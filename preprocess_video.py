@@ -1,161 +1,216 @@
+import datetime
 import subprocess
 import sys
-
 import cv2
 import json
-
+from datetime import timedelta
+import numpy as np
+import os
+from datetime import datetime, timedelta
 from utils import getcodec_audio
 
-SENSITIVITY = 3  # A number between 0 and 10, for intensity of flashes
-BUFFER_SIZE = 3  # The number of frames to hold in history, minimum of 2
+
+BRIGHTNESS_CHANGE_THRESHOLD = 40
 
 
-def capture_size(capture):
-    width = capture.get(3)  # frame width
-    height = capture.get(4)  # frame height
+def detect_fragments_with_flashes1(video_path):
+    # Load the video file
+    cap = cv2.VideoCapture(video_path)
 
-    print("Width: ", width)
-    print("Height: ", height)
-
-    return (int(width), int(height))
-
-
-def codec(codecName):
-    print("Using codec:", codecName)
-    return cv2.VideoWriter_fourcc(*codecName)
-
-
-def setup_stream(inputFile, outputFile, codecName="avc1"):
-    inputVideo = cv2.VideoCapture(inputFile)
-
-    videoSize = capture_size(inputVideo)
-    videoCodec = codec(codecName)
-    frameRate = 20.0
-
-    outputVideo = cv2.VideoWriter(
-        outputFile, videoCodec, frameRate, videoSize, True)
-
-    return (inputVideo, outputVideo)
-
-
-# Gets a numeric value, for average brightness of a given frame
-def get_brightness(frame):
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    value = cv2.split(frame)[2]
-    average = cv2.mean(value)
-    return average[0]
-
-
-# Determins if a given frame is a camera flash, or just slight change
-def detect_if_flash(frameBrightness):
-    if len(frameBrightness) < BUFFER_SIZE:
-        return False
-    didFlashHappen = True
-    for b in range(BUFFER_SIZE - 1):
-        if frameBrightness[b] + SENSITIVITY > frameBrightness[BUFFER_SIZE - 1]:
-            didFlashHappen = False
-            break
-    return didFlashHappen
-
-
-# Takes a frame which has white flash, brings brightness down to match before frame
-def fix_flash():
-    return True
-
-
-def analyse_frames(inputFile, outputFile, codecName):
-    inputVideo, outputVideo = setup_stream(inputFile, outputFile, codecName)
-
-    count = 0  # Iterating through number of frames
-    buffer = []
+    # Initialize variables
+    fragments_with_flashes = []
+    fragments = []
+    current_fragment_start = None
+    current_fragment_end = None
     previous_frame = None
     previous_brightness = None
+    frame_count = 0
 
-    while inputVideo.isOpened():
-        ret, frame = inputVideo.read()
+    # Loop through the video frames
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        if ret is True:
-            # Calculate brightness of current frame
-            frameBrightness = get_brightness(frame)
+        # Convert the frame to grayscale
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # Maintain a buffer of the past 3 frames
-            buffer.append(frameBrightness)
-            if len(buffer) > BUFFER_SIZE:
-                buffer.pop(0)
+        # Calculate the brightness of the frame
+        brightness = cv2.mean(gray_frame)[0]
 
-            # Detect if flash
-            if detect_if_flash(buffer):
-                # print("Flash detected at frame %d" % count)
-                print("Flash detected at frame : " + str(count) + "   timestamp is: ",
-                      str(round(inputVideo.get(cv2.CAP_PROP_POS_MSEC), 3)))
+        # Check if the frame has a white flash
+        if previous_frame is not None:
+            frame_diff = cv2.absdiff(gray_frame, previous_frame)
+            diff_mean = cv2.mean(frame_diff)[0]
+            if diff_mean > BRIGHTNESS_CHANGE_THRESHOLD and brightness > previous_brightness:
+                if current_fragment_start is None:
+                    current_fragment_start = frame_count - 1
+                current_fragment_end = frame_count
 
-                # Convert the frame to grayscale
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Check if the brightness of the frame has changed too fast
+        if previous_brightness is not None:
+            brightness_diff = abs(brightness - previous_brightness)
+            if brightness_diff > BRIGHTNESS_CHANGE_THRESHOLD:
+                if current_fragment_start is None:
+                    current_fragment_start = frame_count - 1
+                current_fragment_end = frame_count
 
-                # Calculate the brightness of the current frame
-                brightness = cv2.mean(gray_frame)[0]
+        # If a fragment has ended, add it to the appropriate list
+        if current_fragment_start is not None and current_fragment_end is not None:
+            if previous_frame is not None:
+                fragments_with_flashes.append((current_fragment_start, current_fragment_end))
+            fragments.append((current_fragment_start, current_fragment_end))
+            current_fragment_start = None
+            current_fragment_end = None
 
-                # If the previous frame exists and its brightness is greater than the current frame's brightness
-                if previous_frame is not None and previous_brightness > brightness:
-                    # Reduce the brightness of the current frame to match the previous frame's brightness
-                    alpha = previous_brightness / brightness
-                    beta = 0
-                    adjusted_frame = cv2.addWeighted(gray_frame, alpha, gray_frame, beta, 0)
+        # Update the previous frame and brightness
+        previous_frame = gray_frame
+        previous_brightness = brightness
 
-                    frame = adjusted_frame
-                # If the previous frame exists and its brightness is less than the current frame's brightness
-                else:
-                    pass
+        # Increment the frame count
+        frame_count += 1
 
-            count += 1
+    # Release the video file and destroy the window
+    cap.release()
+    cv2.destroyAllWindows()
 
-            outputVideo.write(frame)
+    # If a fragment is currently being tracked, add its end timestamp to the list of fragments
+    if current_fragment_start is not None and current_fragment_end is not None:
+        fragments.append((current_fragment_start, current_fragment_end))
 
+    return fragments_with_flashes, fragments
+
+
+def detect_flash(video_file):
+    cap = cv2.VideoCapture(video_file)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Threshold for detecting a flash
+    flash_threshold = 150
+
+    # Minimum duration (in seconds) for a fragment to be considered a flash
+    min_flash_duration = 0.5
+
+    fragments_with_flashes = []
+    all_fragments = []
+
+    previous_frame = None
+    previous_brightness = None
+    fragment_start_time = None
+    fragment_end_time = None
+
+    for i in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Convert frame to grayscale and compute its brightness
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        brightness = cv2.mean(gray)[0]
+
+        # Check for a flash
+        if previous_frame is not None:
+            frame_diff = cv2.absdiff(previous_frame, frame)
+            diff_mean = cv2.mean(frame_diff)[0]
+            if diff_mean > flash_threshold or abs(brightness - previous_brightness) > 100:
+                if fragment_start_time is None:
+                    fragment_start_time = i / fps
+                fragment_end_time = i / fps
+        previous_frame = frame.copy()
+        previous_brightness = brightness
+
+        # Check if the current fragment has ended
+        if fragment_end_time is not None and fragment_end_time - fragment_start_time >= min_flash_duration:
+            if fragment_end_time - fragment_start_time >= min_flash_duration:
+                fragments_with_flashes.append((int(fragment_start_time * 1000), int(fragment_end_time * 1000)))
+            else:
+                all_fragments.append((int(fragment_start_time * 1000), int(fragment_end_time * 1000)))
+            fragment_start_time = None
+            fragment_end_time = None
+
+    # Check if the last fragment has ended
+    if fragment_end_time is not None:
+        if fragment_end_time - fragment_start_time >= min_flash_duration:
+            fragments_with_flashes.append((int(fragment_start_time * 1000), int(fragment_end_time * 1000)))
         else:
-            print("stream failed to read")
+            all_fragments.append((int(fragment_start_time * 1000), int(fragment_end_time * 1000)))
+
+    cap.release()
+
+    # Convert to SRT format
+    srt_output = ''
+    fragment_counter = 1
+    for fragment_start, fragment_end in fragments_with_flashes:
+        srt_output += str(fragment_counter) + '\n'
+        srt_output += '{0} --> {1}\n'.format(timedelta(milliseconds=fragment_start), timedelta(milliseconds=fragment_end))
+        srt_output += ' Frame {0} - Frame {1}\n\n'.format(int(fragment_start / 1000 * fps), int(fragment_end / 1000 * fps))
+        fragment_counter += 1
+
+    for fragment_start, fragment_end in all_fragments:
+        srt_output += str(fragment_counter) + '\n'
+        srt_output += '{0} --> {1}\n'.format(timedelta(milliseconds=fragment_start), timedelta(milliseconds=fragment_end))
+        srt_output += ' None\n\n'
+        fragment_counter += 1
+
+    return srt_output
+
+
+def remove_flashes(input_video, output_video, brightness_threshold, brightness_drop):
+    cap = cv2.VideoCapture(input_video)
+    fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    writer = cv2.VideoWriter(output_video, fourcc, fps, frame_size)
+
+    previous_frame = None
+    previous_brightness = None
+    is_flashing = False
+    flash_start_frame = None
+
+    for frame_idx in range(total_frames):
+        ret, frame = cap.read()
+
+        if not ret:
             break
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("stream ended")
-            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        brightness = np.mean(gray)
 
-    # Close everything
-    outputVideo.release()
-    inputVideo.release()
+        if previous_brightness is not None and abs(brightness - previous_brightness) > brightness_drop:
+            is_flashing = True
+            flash_start_frame = frame_idx
+
+        if is_flashing and brightness < brightness_threshold:
+            is_flashing = False
+            for i in range(flash_start_frame, frame_idx):
+                writer.write(previous_frame)
+
+        elif not is_flashing:
+            writer.write(frame)
+
+        previous_frame = frame
+        previous_brightness = brightness
+
+    cap.release()
+    writer.release()
     cv2.destroyAllWindows()
 
 
-inputFile = 'D:\Projects\kion_safty\demos\Free Epilepsy Test [2017] (possible seizures).mp4'
+
+#inputFile = 'D:\Projects\kion_safty\demos\Free Epilepsy Test [2017] (possible seizures).mp4'
 # inputFile = 'D:\Projects\kion_safty\demos\Landshapes  Rosemary Official Video Photosensitive Seizure Warning_1080p.mp4'
-# inputFile = 'D:\Projects\kion_safty\demos\SCREAMER.mp4'
+inputFile = 'D:\Projects\kion_safty\demos\SCREAMER.mp4'
 outputFile = 'D:\Projects\kion_safty\demos\LCREAMER.mp4'
 codecName = "avc1"
 
+video_path = inputFile
+srt_lines = detect_flash(video_path)
+print('Fragments with flashes:', srt_lines)
+remove_flashes(video_path, outputFile, brightness_threshold=30, brightness_drop=5)
+sys.exit()
 
-def probe_file(filename):
-    command_line = ['ffmpeg/bin/ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
-                    f"{filename}"]
-    p = subprocess.Popen(command_line, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    print(filename)  # * Sanity check *
-    out, err = p.communicate()
-    if len(out) > 0:  # ** if result okay
-        print("==========output==========")
-        result = json.loads(out)
-    else:
-        result = {}
-    if err:
-        print("========= error ========")
-        print(err)
-    return result
-
-
-jstream = probe_file(inputFile)
-for streams in jstream['streams']:
-    codecName = streams['codec_name']
-    if codecName:
-        print(codecName)
-        break
-
-print("inputFile: ", inputFile)
-print("outputFile: ", outputFile)
-analyse_frames(inputFile, outputFile, codecName)

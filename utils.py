@@ -1,4 +1,31 @@
 import subprocess
+import json
+
+
+def probe_file(filename):
+    codecName = ''
+    command_line = ['ffmpeg/bin/ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
+                    f"{filename}"]
+    p = subprocess.Popen(command_line, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print(filename)  # * Sanity check *
+    out, err = p.communicate()
+    if len(out) > 0:  # ** if result okay
+        print("==========output==========")
+        result = json.loads(out)
+    else:
+        result = {}
+    if err:
+        print("========= error ========")
+        print(err)
+
+    jstream = result
+    for streams in jstream['streams']:
+        codecName = streams['codec_name']
+        if codecName:
+            print(codecName)
+            break
+
+    return codecName
 
 
 def extract_wav(video_file, wav_file):
