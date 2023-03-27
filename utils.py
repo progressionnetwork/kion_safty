@@ -38,6 +38,16 @@ def extract_wav(video_file, wav_file):
     return wav_file
 
 
+def norm_wav(video_file, wav_file):
+    # ./ffmpeg -i input.wav -filter:a "dynaudnorm=p=0.9:s=5" output.wav -hide_banner
+    # -loglevel error
+    command = ['ffmpeg/bin/ffmpeg', '-i', video_file, '-af', 'volumedetect', '-vn', '-sn', '-dn',
+               wav_file, '-hide_banner', '-loglevel', 'error']
+    print('ffmpeg command:', command)
+    subprocess.run(command, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    return wav_file
+
+
 def replace_audio(video_filename, audio_wav, out_file):
     # ./ffmpeg -i v.mp4 -i a.wav -c:v copy -map 0:v:0 -map 1:a:0 new.mp4 -hide_banner -loglevel error
     command = ['ffmpeg/bin/ffmpeg', '-i', video_filename, '-i', audio_wav, '-c:v', 'copy', '-map', '0:v:0', '-map',

@@ -1,4 +1,5 @@
 import datetime
+import re
 import subprocess
 import sys
 import cv2
@@ -89,10 +90,10 @@ def detect_flash(video_file):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # Threshold for detecting a flash
-    flash_threshold = 150
+    flash_threshold = 120
 
     # Minimum duration (in seconds) for a fragment to be considered a flash
-    min_flash_duration = 0.5
+    min_flash_duration = 1
 
     fragments_with_flashes = []
     all_fragments = []
@@ -149,11 +150,11 @@ def detect_flash(video_file):
         srt_output += ' Frame {0} - Frame {1}\n\n'.format(int(fragment_start / 1000 * fps), int(fragment_end / 1000 * fps))
         fragment_counter += 1
 
-    for fragment_start, fragment_end in all_fragments:
-        srt_output += str(fragment_counter) + '\n'
-        srt_output += '{0} --> {1}\n'.format(timedelta(milliseconds=fragment_start), timedelta(milliseconds=fragment_end))
-        srt_output += ' None\n\n'
-        fragment_counter += 1
+    # for fragment_start, fragment_end in all_fragments:
+    #     srt_output += str(fragment_counter) + '\n'
+    #     srt_output += '{0} --> {1}\n'.format(timedelta(milliseconds=fragment_start), timedelta(milliseconds=fragment_end))
+    #     srt_output += ' None\n\n'
+    #     fragment_counter += 1
 
     return srt_output
 
@@ -201,6 +202,177 @@ def remove_flashes(input_video, output_video, brightness_threshold, brightness_d
     cv2.destroyAllWindows()
 
 
+def normalize_video(input_path, output_path, brightness_threshold, brightness_drop):
+    cap = cv2.VideoCapture(input_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
+
+    previous_frame = None
+    previous_brightness = None
+    flash_frames = []
+
+    for i in range(frame_count):
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        brightness = np.mean(gray)
+
+        if previous_frame is not None:
+            brightness_change = abs(brightness - previous_brightness)
+
+            if brightness > brightness_threshold and brightness_change > brightness_drop:
+                flash_frames.append(i)
+
+                if len(flash_frames) == 1:
+                    start_frame = max(0, i - int(fps * 2))
+                    end_frame = i
+                    for j in range(start_frame, end_frame):
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        brightness = np.mean(gray)
+
+                        normalized_frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
+                        out.write(normalized_frame)
+
+                flash_frames.append(i)
+            else:
+                normalized_frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
+                out.write(normalized_frame)
+
+        previous_frame = frame
+        previous_brightness = brightness
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+
+def create_gradient(width, height):
+    image = np.zeros((1,width,3), dtype='uint8') # starting image with one row black pixels
+    for row in range(height):
+        pixel_value = int(row*255/height)
+        new_row = np.ones((1,width,3), dtype='uint8')*pixel_value # creating new row
+        image = np.concatenate((image, new_row)) # concatenate images
+    return image
+
+
+def blur_flickers(input_video, srt_lines, output_video):
+    # Read the video file
+    cap = cv2.VideoCapture(input_video)
+    if not cap.isOpened():
+        raise Exception("Error opening video file")
+
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    # Initialize the video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(output_video, fourcc, fps, frame_size)
+
+    # Parse the SRT file to get the timestamps of flickered fragments
+    flicker_timestamps = []
+
+    matches = re.findall(r'\d+:\d+:\d+\.\d+ --> \d+:\d+:\d+\.\d+', srt_lines)
+    for match in matches:
+        start_time, end_time = match.split(' --> ')
+        start_frame = int(float(start_time.split(':')[-1]) * fps)
+        end_frame = int(float(end_time.split(':')[-1]) * fps)
+        flicker_timestamps.append((start_frame, end_frame))
+
+    # Loop through the frames and blur the flickered fragments
+    for frame_idx in range(int(cap.get(cv2.CAP_PROP_FRAME_COUNT))):
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        # Check if the current frame index is within any of the flickered fragments
+        is_flicker = False
+        for start_frame, end_frame in flicker_timestamps:
+            #print(start_frame, end_frame)
+            if start_frame <= frame_idx <= end_frame:
+                is_flicker = True
+                break
+
+        writer.write(frame)
+
+    # Release resources
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+
+
+def blur_xflickers(input_video, srt_lines, output_video):
+    # Read the video file
+    cap = cv2.VideoCapture(input_video)
+    if not cap.isOpened():
+        raise Exception("Error opening video file")
+
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+
+    # Initialize the video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(output_video, fourcc, fps, frame_size)
+
+    # Parse the SRT file to get the timestamps of flickered fragments
+    flicker_timestamps = []
+
+    matches = re.findall(r'\d+:\d+:\d+\.\d+ --> \d+:\d+:\d+\.\d+', srt_lines)
+    for match in matches:
+        start_time, end_time = match.split(' --> ')
+        start_frame = int(float(start_time.split(':')[-1]) * fps)
+        end_frame = int(float(end_time.split(':')[-1]) * fps)
+        flicker_timestamps.append((start_frame, end_frame))
+
+    # Loop through the frames and blur the flickered fragments
+    for frame_idx in range(int(cap.get(cv2.CAP_PROP_FRAME_COUNT))):
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        # Check if the current frame index is within any of the flickered fragments
+        is_flicker = False
+        for start_frame, end_frame in flicker_timestamps:
+            if frame_idx >= start_frame and frame_idx <= end_frame:
+                #frame = np.zeros(frame.shape, dtype=np.uint8)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                smooth = cv2.GaussianBlur(gray, (95, 95), 0)
+                frame = cv2.divide(gray, smooth, scale=192)
+
+                # Write some Text
+                text = "Alert! Blocked video fragment."
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                fontScale = 1
+                fontColor = (255,255,255)
+
+                h, w, *_ = frame.shape
+                h = h // 2
+                w = w // 2
+
+                cv2.putText(frame, text, (h,w), font, fontScale, fontColor)
+
+                writer.write(frame)
+                is_flicker = True
+
+        writer.write(frame)
+
+    # Release resources
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+
 
 #inputFile = 'D:\Projects\kion_safty\demos\Free Epilepsy Test [2017] (possible seizures).mp4'
 # inputFile = 'D:\Projects\kion_safty\demos\Landshapes  Rosemary Official Video Photosensitive Seizure Warning_1080p.mp4'
@@ -210,7 +382,10 @@ codecName = "avc1"
 
 video_path = inputFile
 srt_lines = detect_flash(video_path)
-print('Fragments with flashes:', srt_lines)
-remove_flashes(video_path, outputFile, brightness_threshold=30, brightness_drop=5)
+print('Fragments with flashes:\n', srt_lines)
+#remove_flashes(video_path, outputFile, brightness_threshold=30, brightness_drop=5)
+blur_xflickers(video_path, srt_lines, outputFile)
+# normalize_video(video_path, outputFile, brightness_threshold=5, brightness_drop=1)
+# normalize_video(outputFile, outputFile+'.mp4', brightness_threshold=5, brightness_drop=1)
 sys.exit()
 
